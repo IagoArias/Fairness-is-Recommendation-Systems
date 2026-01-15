@@ -120,7 +120,11 @@ def evaluate_user_based_cf(
     k_ndcg: int = 20,
     n_jobs: int = -1,
 ):
-    """Run user-based CF across folds and return aggregated metrics."""
+    """Run user-based CF across folds.
+    Returns:
+      metrics_df: one row per (fold, k)
+      avg_df: averaged across folds per k (and Model/Similarity)
+    """
     k_values = k_values or [50, 150, 500, None]
     all_folds_metrics = []
 
@@ -131,14 +135,21 @@ def evaluate_user_based_cf(
 
         global_mean_value = np.nanmean(R_train) if np.any(~np.isnan(R_train)) else 0.0
         user_means = np.array(
-            [np.nanmean(R_train[u]) if np.any(~np.isnan(R_train[u])) else global_mean_value for u in range(num_users)]
+            [
+                np.nanmean(R_train[u]) if np.any(~np.isnan(R_train[u])) else global_mean_value
+                for u in range(num_users)
+            ]
         )
+
         sim_matrix = compute_similarity_matrix(R_train, user_means)
         rated_by_item = [np.where(~np.isnan(R_train[:, j]))[0] for j in range(num_items)]
 
         for k in k_values:
             R_pred_rows = Parallel(n_jobs=n_jobs)(
-                delayed(predict_user_ratings)(u, R_train, sim_matrix, user_means, k, rated_by_item) for u in range(num_users)
+                delayed(predict_user_ratings)(
+                    u, R_train, sim_matrix, user_means, k, rated_by_item
+                )
+                for u in range(num_users)
             )
             R_pred = np.vstack(R_pred_rows)
 
@@ -162,7 +173,19 @@ def evaluate_user_based_cf(
             )
             all_folds_metrics.append(metrics)
 
-    return pd.DataFrame(all_folds_metrics)
+    metrics_df = pd.DataFrame(all_folds_metrics)
+
+    group_cols = ["Model", "Similarity", "k_neighbors"]
+    num_cols = metrics_df.select_dtypes(include="number").columns.tolist()
+    num_cols = [c for c in num_cols if c != "Fold"]
+
+    avg_df = (
+        metrics_df
+        .groupby(group_cols, as_index=False)[num_cols]
+        .mean()
+    )
+
+    return metrics_df, avg_df
 
 
 def evaluate_item_based_cf(
@@ -172,7 +195,11 @@ def evaluate_item_based_cf(
     topn_div: int = 5,
     k_ndcg: int = 20,
 ):
-    """Run item-based CF across folds and return aggregated metrics."""
+    """Run item-based CF across folds.
+    Returns:
+      metrics_df: one row per (fold, k)
+      avg_df: averaged across folds per k (and Model/Similarity)
+    """
     k_values = k_values or [50, 150, 500, None]
     all_folds_metrics_item = []
 
@@ -204,4 +231,18 @@ def evaluate_item_based_cf(
             )
             all_folds_metrics_item.append(metrics)
 
-    return pd.DataFrame(all_folds_metrics_item)
+    metrics_df = pd.DataFrame(all_folds_metrics_item)
+
+    # Average across folds per k (and keep metadata columns)
+    group_cols = ["Model", "Similarity", "k_neighbors"]
+    num_cols = metrics_df.select_dtypes(include="number").columns.tolist()
+    num_cols = [c for c in num_cols if c != "Fold"]  # don't average Fold
+
+    avg_df = (
+        metrics_df
+        .groupby(group_cols, as_index=False)[num_cols]
+        .mean()
+    )
+
+    return metrics_df, avg_df
+
