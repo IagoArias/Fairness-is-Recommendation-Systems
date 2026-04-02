@@ -199,3 +199,65 @@ def evaluate_all_metrics(
         "Diversity": diversity,
         "nDCG@20": ndcg,
     }
+
+
+def awpd(
+    user_clusters: np.ndarray,        # (U,)     user -> cluster index
+    item_clusters: np.ndarray,        # (I,)     item -> cluster index
+    affinity: np.ndarray,             # (UC, IC) affinity matrix, values in [0,1]
+    popularity: np.ndarray,           # (I,)     item popularity, normalized [0,1]
+    history: list[list[int]],         # (U,)     item indices per user (ragged)
+    recommendations: list[list[int]], # (U,)     item indices per user
+    rmse_per_user: np.ndarray = None  # (U,)     optional, for diagnostic plotting
+) -> dict:
+    U = len(history)
+
+    affinity_normalized = 1 / (1 + np.exp(-affinity))
+    all_items = np.concatenate([np.array(h) for h in history])
+    item_counts       = np.bincount(all_items, minlength=len(popularity))
+    empirical_popularity = item_counts / item_counts.max()  # [0,1], preserves Zipf shape
+
+    pop_deviations = np.empty(U)
+    misalignments  = np.empty(U)
+    scores         = np.empty(U)
+
+    for u in range(U):
+        uc            = user_clusters[u]
+        hist          = np.array(history[u])
+        recs          = np.array(recommendations[u])
+        hist_pop_mean = popularity[hist].mean()
+
+        aff           = affinity_normalized[uc, item_clusters[recs]]
+        pop_diff      = empirical_popularity[recs]
+
+        pop_deviations[u] = pop_diff.mean()
+        misalignments[u]  = (1 - aff).mean()
+        scores[u]         = np.sqrt(pop_diff**2 + (1 - aff)**2).mean()  # Fórmula igual que la velocidad en física, pop_deviation y pop_deviation son componentes
+
+    # Aggregate by cluster
+    cluster_ids = np.unique(user_clusters)
+    by_cluster = {}
+    for c in cluster_ids:
+        mask = user_clusters == c
+        entry = {
+            "awpd":          float(scores[mask].mean()),
+            "pop_deviation": float(pop_deviations[mask].mean()),
+            "misalignment":  float(misalignments[mask].mean()),
+            "n_users":       int(mask.sum()),
+        }
+        if rmse_per_user is not None:
+            entry["rmse"] = float(rmse_per_user[mask].mean())
+        by_cluster[int(c)] = entry
+
+    result = {
+        "awpd":          float(scores.mean()),
+        "per_user_awpd": scores,
+        "pop_deviation": pop_deviations,
+        "misalignment":  misalignments,
+        "by_cluster":    by_cluster,
+    }
+
+    if rmse_per_user is not None:
+        result["rmse"] = rmse_per_user
+
+    return result
