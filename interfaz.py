@@ -44,6 +44,7 @@ TRANSLATIONS = {
         "rating_heatmap": "Rating heatmap",
         "matrix_evolution": "Model evolution across runs",
         "upd_mis": "UPD vs Misalignment by group (across runs)",
+        "collapse_tip": "💡 Collapse the sidebar (« arrow) for a full-width view of the animations.",
     },
     "es": {
         "page_cluster": "Modelado",
@@ -81,6 +82,7 @@ TRANSLATIONS = {
         "rating_heatmap": "Mapa de calor de valoraciones",
         "matrix_evolution": "Evolución de modelos a lo largo de las iteraciones",
         "upd_mis": "UPD vs Misalignment por grupo (a lo largo de las iteraciones)",
+        "collapse_tip": "💡 Colapsa el panel lateral (flecha «) para ver las animaciones a pantalla completa.",
     },
 }
 
@@ -310,6 +312,7 @@ else:
             st.pyplot(fig_c, clear_figure=True, width='stretch')
 
         st.divider()
+        st.info(T["collapse_tip"])
         st.subheader(T["matrix_evolution"])
         anim_dir = scenario_dir / "animations"
         html_files = sorted(f for f in anim_dir.glob("anim_*.html") if f.name != "anim_upd_mis_groups.html")
