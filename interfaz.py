@@ -149,8 +149,8 @@ def load_scenario_context(scenario_dir: Path):
 st.set_page_config(page_title="Cluster Simulation", layout="wide")
 
 with st.sidebar:
-    lang_choice = st.selectbox("🌐", ["🇬🇧", "🇪🇸"], label_visibility="collapsed")
-    T = TRANSLATIONS["en" if lang_choice == "🇬🇧" else "es"]
+    lang_choice = st.selectbox("🌐", ["English", "Español"], label_visibility="collapsed")
+    T = TRANSLATIONS["en" if lang_choice == "English" else "es"]
 
     page = st.radio(
         "View",
@@ -320,8 +320,8 @@ else:
             with tab:
                 components.html(
                     html_file.read_text(encoding="utf-8"),
-                    height=750,
-                    scrolling=False,
+                    height=900,
+                    scrolling=True,
                 )
 
         group_anim_file = anim_dir / "anim_upd_mis_groups.html"
@@ -330,6 +330,6 @@ else:
             st.subheader(T["upd_mis"])
             components.html(
                 group_anim_file.read_text(encoding="utf-8"),
-                height=950,
-                scrolling=False,
+                height=1100,
+                scrolling=True,
             )
