@@ -139,10 +139,10 @@ def build_ratings(
 def load_scenario_context(scenario_dir: Path):
     state = np.load(scenario_dir / "simulation_state.npz")
     U = int(state["num_users"][0])
-    base = pd.read_parquet(scenario_dir / "ratings_long.parquet")
+    base = pd.read_parquet(scenario_dir / "ratings_long.parquet").dropna(subset=["UserID", "MovieID", "Rating"])
     I = int(base["MovieID"].max()) + 1
     R = np.full((U, I), np.nan, dtype=np.float32)
-    R[base["UserID"].to_numpy(int), base["MovieID"].to_numpy(int)] = base["Rating"].to_numpy(np.float32)
+    R[base["UserID"].to_numpy(np.int64), base["MovieID"].to_numpy(np.int64)] = base["Rating"].to_numpy(np.float32)
     return R, state["user_clusters"], state["item_clusters"], state["affinity"]
 
 
