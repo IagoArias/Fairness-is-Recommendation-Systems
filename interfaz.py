@@ -176,7 +176,7 @@ with st.sidebar:
         st.header(T["sim_params"])
         U = st.number_input(T["users"], min_value=10, max_value=5000, value=1000, step=50)
         I = st.number_input(T["items"], min_value=10, max_value=5000, value=2000, step=50)
-        density = st.slider(T["density"], min_value=0.001, max_value=0.2, value=0.063, step=0.001)
+        density = st.slider(T["density"], min_value=0.001, max_value=0.2, value=0.063, step=0.001, format="%.3f")
         alpha_user = st.slider(T["alpha_user"], min_value=0.0, max_value=2.0, value=0.9, step=0.05)
         alpha_item = st.slider(T["alpha_item"], min_value=0.0, max_value=2.0, value=0.9, step=0.05)
         seed = st.number_input(T["seed"], min_value=0, max_value=10_000, value=42, step=1)
