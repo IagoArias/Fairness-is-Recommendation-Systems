@@ -256,22 +256,28 @@ if page == T["page_cluster"]:
             heatmap_items=heatmap_items,
             heatmap_title=T["heatmap_title"].format(u=heatmap_users, i=heatmap_items),
         )
-        fig3, _, _ = cs.plot_cluster_ordered_heatmap(
-            R_syn=R_syn,
-            user_cluster=sim_state["user_cluster"],
-            item_cluster=sim_state["item_cluster"],
-            A=sim_state["A"],
-            heatmap_users=heatmap_users,
-            heatmap_items=heatmap_items,
-            heatmap_title=T["cluster_heatmap_title"],
-        )
     except ValueError as exc:
         st.warning(str(exc))
         st.stop()
 
+    clusters_active = sim_state["user_cluster"] is not None and sim_state["item_cluster"] is not None
+    if clusters_active:
+        try:
+            fig3, _, _ = cs.plot_cluster_ordered_heatmap(
+                R_syn=R_syn,
+                user_cluster=sim_state["user_cluster"],
+                item_cluster=sim_state["item_cluster"],
+                A=sim_state["A"],
+                heatmap_users=heatmap_users,
+                heatmap_items=heatmap_items,
+                heatmap_title=T["cluster_heatmap_title"],
+            )
+        except ValueError as exc:
+            st.warning(str(exc))
+            st.stop()
+
     fig.set_size_inches(10, 3)
     fig2.set_size_inches(6, 4)
-    fig3.set_size_inches(7, 5)
 
     st.subheader(T["distributions"])
     st.pyplot(fig, clear_figure=True)
@@ -279,8 +285,10 @@ if page == T["page_cluster"]:
     st.subheader(T["rating_heatmap_subset"])
     st.pyplot(fig2, clear_figure=True)
 
-    st.subheader(T["cluster_heatmap"])
-    st.pyplot(fig3, clear_figure=True)
+    if clusters_active:
+        fig3.set_size_inches(7, 5)
+        st.subheader(T["cluster_heatmap"])
+        st.pyplot(fig3, clear_figure=True)
 
 # ── Model Simulation page ────────────────────────────────────────────────────
 else:
