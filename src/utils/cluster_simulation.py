@@ -549,7 +549,7 @@ def plot_simulation_distributions_and_heatmap(
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    rating_counts = ratings_df.stack().astype(int).value_counts().reindex([1, 2, 3, 4, 5], fill_value=0)
+    rating_counts = ratings_df.stack().dropna().astype(int).value_counts().reindex([1, 2, 3, 4, 5], fill_value=0)
     axes[0].bar(rating_counts.index, rating_counts.values, color="steelblue", width=0.8)
     axes[0].set_title("Rating value distribution")
     axes[0].set_xlabel("Rating")
