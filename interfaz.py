@@ -85,6 +85,7 @@ TRANSLATIONS = {
 }
 
 
+
 @st.cache_data(show_spinner=False)
 def build_ratings(
     U: int,
@@ -144,6 +145,18 @@ def load_scenario_context(scenario_dir: Path):
     R = np.full((U, I), np.nan, dtype=np.float32)
     R[base["UserID"].to_numpy(np.int64), base["MovieID"].to_numpy(np.int64)] = base["Rating"].to_numpy(np.float32)
     return R, state["user_clusters"], state["item_clusters"], state["affinity"]
+
+
+def _make_responsive(html: str) -> str:
+    patch = (
+        "<style>"
+        "body{margin:0;overflow-x:hidden}"
+        ".animation{display:block!important;width:100%!important}"
+        ".animation img{width:100%!important;height:auto!important;max-width:100%!important}"
+        "input.anim-slider{width:80%!important}"
+        "</style>"
+    )
+    return patch + html
 
 
 st.set_page_config(page_title="Cluster Simulation", layout="wide")
@@ -256,6 +269,10 @@ if page == T["page_cluster"]:
         st.warning(str(exc))
         st.stop()
 
+    fig.set_size_inches(10, 3)
+    fig2.set_size_inches(6, 4)
+    fig3.set_size_inches(7, 5)
+
     st.subheader(T["distributions"])
     st.pyplot(fig, clear_figure=True)
 
@@ -318,18 +335,12 @@ else:
         tabs = st.tabs(model_names)
         for tab, html_file in zip(tabs, html_files):
             with tab:
-                components.html(
-                    html_file.read_text(encoding="utf-8"),
-                    height=630,
-                    scrolling=True,
-                )
+                html = _make_responsive(html_file.read_text(encoding="utf-8"))
+                components.html(html, height=750, scrolling=False)
 
         group_anim_file = anim_dir / "anim_upd_mis_groups.html"
         if group_anim_file.exists() and selected != "Normal":
             st.divider()
             st.subheader(T["upd_mis"])
-            components.html(
-                group_anim_file.read_text(encoding="utf-8"),
-                height=770,
-                scrolling=True,
-            )
+            html = _make_responsive(group_anim_file.read_text(encoding="utf-8"))
+            components.html(html, height=950, scrolling=False)
