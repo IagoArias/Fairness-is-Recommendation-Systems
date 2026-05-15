@@ -34,7 +34,7 @@ def affinity_matrix(
             A[np.ix_(normal_users, outlier_items)] -= 2.0
         if outlier_users.size > 0:
             A[np.ix_(outlier_users, outlier_items)] += 1.5
-    elif kind == "two_types":
+    elif kind == "bipolar":
         user_split = n_user_clusters // 2
         item_split = n_item_clusters // 2
 
@@ -44,8 +44,8 @@ def affinity_matrix(
         item_types[item_split:] = 1
 
         same_type = user_types[:, None] == item_types[None, :]
-        A[same_type] += 1.2
-        A[~same_type] -= 1.2
+        A[same_type] += 2
+        A[~same_type] -= 2
     elif kind != "normal":
         raise ValueError(f"Unknown affinity matrix kind: {kind}")
 

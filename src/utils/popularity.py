@@ -1,18 +1,28 @@
 from surprise import Dataset, Reader, SVDpp, SVD, BaselineOnly, KNNBasic,NormalPredictor
+from scipy.sparse import csr_matrix
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from cluster_simulation import ratings_for_new_pairs
+from .cluster_simulation import ratings_for_new_pairs
+
+
+class PopularityModel:
+    """Non-personalized model: recommends items with the highest mean rating."""
+    def fit(self, trainset):
+        return self
+
 
 def get_models():
     return {
         "BaselineOnly": BaselineOnly(verbose=False),
-        #"KNNBasic": KNNBasic(
-          #  sim_options={"name": "pearson_baseline", "user_based": True},
-           # verbose=False,
-       # ),
+        
+        "CF User-Pearson": KNNBasic(
+            sim_options={"name": "pearson_baseline", "user_based": True},
+            verbose=False,
+        ),
         "SVD": SVD(random_state=42, verbose=False),
-       # "SVDpp": SVDpp(random_state=42, verbose=False),
+        "SVDpp": SVDpp(random_state=42, verbose=False),
+        "Popularity": PopularityModel(),
         "Random": NormalPredictor(),
     }
 
@@ -131,70 +141,103 @@ def topk_svdpp(
     return topk
 
 
-def topk_knn_candidates(
+def topk_knn_vectorized(
     algo,
     trainset,
     k=5,
-    max_cand=2000,
     exclude_seen=True,
     blocked_items_by_user=None,
     return_scores=False,
 ):
+    """
+    User-based CF with Pearson-baseline similarity.
+    Scores item i for user u as the weighted average of all neighbors who rated i,
+    weighted by their Pearson similarity to u.
+    """
+    U, I = trainset.n_users, trainset.n_items
+
+    # build sparse ratings matrix R (U x I)
+    rows, cols, data = [], [], []
+    for u in range(U):
+        for (i, r) in trainset.ur[u]:
+            rows.append(u); cols.append(i); data.append(r)
+    R = csr_matrix((data, (rows, cols)), shape=(U, I), dtype=np.float32).toarray()
+
+    R_binary = (R != 0).astype(np.float32)
+    sim = algo.sim  # (U, U) — full similarity matrix, no sparsification
+
+    mu = trainset.global_mean
+    bu = algo.bu  # (U,) — already computed by pearson_baseline
+    bi = algo.bi  # (I,) — already computed by pearson_baseline
+    B = mu + bu[:, None] + bi[None, :]       # (U, I) baseline matrix
+    R_centered = np.where(R != 0, R - B, 0)  # subtract bias only where rated
+
+    numerator   = sim @ R_centered           # (U, I)
+    denominator = np.abs(sim) @ R_binary     # (U, I)
+    denominator[denominator == 0] = 1.0
+    scores_matrix = B + numerator / denominator  # (U, I)
+
     topk = {}
     topk_scores = {}
-    user_based = algo.sim_options.get("user_based", True)
+    for u in range(U):
+        scores = scores_matrix[u].copy()
+        if exclude_seen:
+            seen = [i for (i, _) in trainset.ur[u]]
+            if seen:
+                scores[seen] = -np.inf
+        blocked = _as_inner_item_array((blocked_items_by_user or {}).get(u))
+        if blocked.size:
+            scores[blocked] = -np.inf
+        idx = _topk_from_scores(scores, k)
+        topk[u] = idx
+        topk_scores[u] = scores[idx]
 
-    for u in range(trainset.n_users):
-        seen = {i for (i, _) in trainset.ur[u]}
-        blocked = set((blocked_items_by_user or {}).get(u, []))
-        cand = set()
-
-        if user_based:
-            neigh = algo.get_neighbors(u, k=algo.k)  # vecinos usuarios (inner ids)
-            for v in neigh:
-                for (i, _) in trainset.ur[v]:
-                    if ((not exclude_seen) or (i not in seen)) and (i not in blocked):
-                        cand.add(i)
-                        if len(cand) >= max_cand:
-                            break
-                if len(cand) >= max_cand:
-                    break
-        else:
-            # item-based: candidatos = vecinos de los ítems que el usuario ha visto
-            for (j, _) in trainset.ur[u]:
-                for i in algo.get_neighbors(j, k=algo.k):
-                    if ((not exclude_seen) or (i not in seen)) and (i not in blocked):
-                        cand.add(i)
-                        if len(cand) >= max_cand:
-                            break
-                if len(cand) >= max_cand:
-                    break
-
-        if not cand:
-            topk[u] = np.array([], dtype=int)
-            topk_scores[u] = np.array([], dtype=float)
-            continue
-
-        cand = np.fromiter(cand, dtype=int)
-        scores = np.empty(len(cand), dtype=float)
-        for t, i in enumerate(cand):
-            est = algo.estimate(u, i)  # usa inner ids
-            if isinstance(est, tuple):
-                est = est[0]
-            scores[t] = est
-
-        k_eff = min(k, len(scores))
-        if k_eff == 0:
-            topk[u] = np.array([], dtype=int)
-            topk_scores[u] = np.array([], dtype=float)
-        else:
-            idx = np.argpartition(scores, -k_eff)[-k_eff:]
-            idx = idx[np.argsort(scores[idx])[::-1]]
-            topk[u] = cand[idx]
-            topk_scores[u] = scores[idx]
     if return_scores:
         return topk, topk_scores
     return topk
+
+def topk_popularity(
+    algo,
+    trainset,
+    k=5,
+    exclude_seen=True,
+    blocked_items_by_user=None,
+    return_scores=False,
+):
+    # Compute item mean ratings once
+    item_sum = np.zeros(trainset.n_items, dtype=np.float64)
+    item_count = np.zeros(trainset.n_items, dtype=np.int32)
+    for u in range(trainset.n_users):
+        for (i, r) in trainset.ur[u]:
+            item_sum[i] += r
+            item_count[i] += 1
+    item_mean = np.where(item_count > 0, item_sum / item_count, 0.0)
+
+    # Global ranking (highest mean first) — computed once, reused for all users
+    global_ranking = np.argsort(item_mean)[::-1]
+
+    topk = {}
+    topk_scores = {}
+    for u in range(trainset.n_users):
+        seen = {i for (i, _) in trainset.ur[u]} if exclude_seen else set()
+        blocked = set(_as_inner_item_array((blocked_items_by_user or {}).get(u)).tolist())
+        excluded = seen | blocked
+
+        chosen = []
+        for i in global_ranking:
+            if i not in excluded:
+                chosen.append(i)
+            if len(chosen) == k:
+                break
+
+        chosen = np.array(chosen, dtype=int)
+        topk[u] = chosen
+        topk_scores[u] = item_mean[chosen]
+
+    if return_scores:
+        return topk, topk_scores
+    return topk
+
 
 def topk_normalpredictor_uniform(
     algo,
@@ -291,7 +334,6 @@ def run_topk_loop_with_state(
     k=4,
     cooldown_runs=None,
     include_base_in_cooldown=True,
-    return_predictions=False,
 ):
     """
     1. Trains each algorityhm
@@ -302,21 +344,19 @@ def run_topk_loop_with_state(
     If cooldown_runs is a positive integer, a recommended (UserID, MovieID)
     pair can only be shown again after cooldown_runs iterations.
 
-    If return_predictions is True, also returns one dataframe per model/run
-    with the selected pairs and their predicted scores at recommendation time.
+    Returns ratings_by_model, topk_by_model, data_train_by_model, rmse_df.
+    rmse_df has one row per (Model, Run) with the RMSE between predicted and actual ratings.
     """
 
     ratings_by_model = {}
     topk_by_model = {}
     data_train_by_model = {}
-    predictions_by_model = {}
+    rmse_rows = []
 
     for name, algo in get_models().items():
         ratings_long_current = ratings_long.copy()
-        ratings_long_runs = []
-        data_train_runs = []
+        increments = [ratings_long.copy()]
         topk_runs = []
-        prediction_runs = []
         use_cooldown = isinstance(cooldown_runs, int) and cooldown_runs > 0
         exclude_seen = not use_cooldown
         last_shown_run = {}
@@ -380,8 +420,17 @@ def run_topk_loop_with_state(
                     blocked_items_by_user=blocked_items_by_user,
                     return_scores=True,
                 )
-            elif name == "KNNBasic":
-                topk, topk_scores = topk_knn_candidates(
+            elif name == "CF User-Pearson":
+                topk, topk_scores = topk_knn_vectorized(
+                    algo,
+                    trainset,
+                    k=k,
+                    exclude_seen=exclude_seen,
+                    blocked_items_by_user=blocked_items_by_user,
+                    return_scores=True,
+                )
+            elif name == "Popularity":
+                topk, topk_scores = topk_popularity(
                     algo,
                     trainset,
                     k=k,
@@ -404,7 +453,6 @@ def run_topk_loop_with_state(
 
             topk_runs.append(topk)
             prediction_df = topk_to_dataframe(trainset, topk, topk_scores)
-            prediction_runs.append(prediction_df)
 
             rows = []
             for u_inner, i_inners in topk.items():
@@ -432,27 +480,42 @@ def run_topk_loop_with_state(
                 u_idx = topk_df["UserID"].to_numpy(dtype=int)
                 i_idx = topk_df["MovieID"].to_numpy(dtype=int)
                 topk_df["Rating"] = R_topk[u_idx, i_idx]
+
+                merged = prediction_df[["UserID", "MovieID", "PredictedRating"]].merge(
+                    topk_df[["UserID", "MovieID", "Rating"]], on=["UserID", "MovieID"]
+                )
+                if len(merged) > 0:
+                    rmse = np.sqrt(((merged["PredictedRating"] - merged["Rating"]) ** 2).mean())
+                    rmse_rows.append({"Model": name, "Run": run, "RMSE": rmse})
             else:
                 topk_df["Rating"] = pd.Series(dtype=float)
 
             ratings_long_current = pd.concat([ratings_long_current, topk_df], ignore_index=True)
-            ratings_long_runs.append(ratings_long_current)
-            data_train_runs.append(data_current)
+            increments.append(topk_df.copy())
 
-        ratings_by_model[name] = ratings_long_runs
         topk_by_model[name] = topk_runs
-        data_train_by_model[name] = data_train_runs
-        predictions_by_model[name] = prediction_runs
+        data_train_by_model[name] = []
+        # keep only deltas until all models finish
+        ratings_by_model[name] = increments
 
-    if return_predictions:
-        return ratings_by_model, topk_by_model, data_train_by_model, predictions_by_model
-    return ratings_by_model, topk_by_model, data_train_by_model
+    # reconstruct cumulative snapshots from deltas now that all models are done
+    for name, increments in ratings_by_model.items():
+        runs = []
+        cumulative = increments[0]
+        for delta in increments[1:]:
+            cumulative = pd.concat([cumulative, delta], ignore_index=True)
+            runs.append(cumulative)
+        ratings_by_model[name] = runs
+
+    rmse_df = pd.DataFrame(rmse_rows)
+    return ratings_by_model, topk_by_model, data_train_by_model, rmse_df
 
 
 
-def popularity_analysis(ratings_by_model, plot_lorenz=True):
+def popularity_analysis(ratings_by_model, plot_lorenz=True, gini_only=False):
     """
-    Makes all popularity analysis with plots included
+    Makes all popularity analysis with plots included.
+    gini_only=True: single side-by-side figure with Gini + Lorenz, colours matched.
     """
     def gini(x):
         x = np.asarray(x, dtype=float)
@@ -546,55 +609,90 @@ def popularity_analysis(ratings_by_model, plot_lorenz=True):
 
     popularity_metrics = compute_popularity_metrics_by_model(ratings_by_model)
 
-    # --- metrics plots ---
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3))
-    for method, sub in popularity_metrics.groupby('model'):
-        axes[0].plot(sub['run'], sub['gini_cnt'], marker='o', label=method)
-        axes[1].plot(sub['run'], sub['top10_share'], marker='o', label=method)
-        axes[2].plot(sub['run'], sub['top100_share'], marker='o', label=method)
+    # shared colour map — sorted model names → consistent colours across both plots
+    model_names_sorted = sorted(ratings_by_model.keys())
+    colors = {name: col for name, col in zip(model_names_sorted, plt.cm.tab10.colors)}
 
-    axes[0].set_title('Gini')
-    axes[0].set_xlabel('run')
-    axes[0].set_ylabel('value')
+    if gini_only:
+        # --- single figure: Gini (left) + Lorenz (right) ---
+        fig, (ax_g, ax_l) = plt.subplots(1, 2, figsize=(14, 5))
 
-    axes[1].set_title('Top-20 share')
-    axes[1].set_xlabel('run')
+        for method, sub in popularity_metrics[popularity_metrics['model'] != 'Base'].groupby('model'):
+            sub = sub.sort_values('run')
+            ax_g.plot(sub['run'], sub['gini_cnt'], marker='o', label=method, color=colors[method])
+        ax_g.set_title('Coeficiente de Gini por iteración')
+        ax_g.set_xlabel('iteración')
+        ax_g.set_ylabel('Gini')
+        ax_g.grid(True, alpha=0.3)
 
-    axes[2].set_title('Top-100 share')
-    axes[2].set_xlabel('run')
-
-    for ax in axes:
-        ax.axvline(-1, color='gray', linestyle='--', alpha=0.5)
-        ax.legend().remove()
-
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='center left', bbox_to_anchor=(.85, 0.5))
-    plt.tight_layout(rect=[0, 0, 0.85, 1])
-    plt.show()
-
-    # --- Lorenz curve ---
-    if plot_lorenz:
-        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
         first_model = next(iter(ratings_by_model))
-        base_df = ratings_by_model[first_model][0]
-        base_cnt = base_df.groupby('MovieID').size().values
+        base_cnt = ratings_by_model[first_model][0].groupby('MovieID').size().values
         lx, ly = lorenz_curve(base_cnt)
-        ax.plot(lx, ly, label='Base', linewidth=2)
-
+        ax_l.plot(lx, ly, label='Base', color='gray', linestyle='--', linewidth=2)
         for name, runs in ratings_by_model.items():
             if not runs:
                 continue
-            last_df = runs[-1]
-            lx, ly = lorenz_curve(last_df.groupby('MovieID').size().values)
-            ax.plot(lx, ly, label=f"{name} (final)")
+            lx, ly = lorenz_curve(runs[-1].groupby('MovieID').size().values)
+            ax_l.plot(lx, ly, label=name, color=colors[name])
+        ax_l.plot([0, 1], [0, 1], linestyle=':', color='black', alpha=0.4)
+        ax_l.set_title('Curva de Lorenz en la última iteración')
+        ax_l.set_xlabel('Proporción de ítems')
+        ax_l.set_ylabel('Proporción de interacciones')
+        ax_l.set_aspect('equal', adjustable='box')
+        ax_l.grid(True, alpha=0.3)
 
-        ax.plot([0, 1], [0, 1], linestyle='--', color='gray', alpha=0.6)
-        ax.set_title('Lorenz Curve (Item Interaction Counts)')
-        ax.set_xlabel('Cumulative share of items')
-        ax.set_ylabel('Cumulative share of interactions')
-        ax.legend()
-        ax.set_aspect('equal', adjustable='box')
-        plt.tight_layout()
+        handles, labels = ax_g.get_legend_handles_labels()
+        fig.legend(handles, labels, loc='center left', bbox_to_anchor=(.81, 0.5))
+        plt.tight_layout(rect=[0, 0, 0.87, 1])
         plt.show()
+
+    else:
+        # --- original three-metric plots ---
+        fig, axes = plt.subplots(1, 3, figsize=(11, 3))
+        for method, sub in popularity_metrics.groupby('model'):
+            c = colors.get(method, None)
+            axes[0].plot(sub['run'], sub['gini_cnt'], marker='o', label=method, color=c)
+            axes[1].plot(sub['run'], sub['top10_share'], marker='o', label=method, color=c)
+            axes[2].plot(sub['run'], sub['top100_share'], marker='o', label=method, color=c)
+
+        axes[0].set_title('Gini')
+        axes[0].set_xlabel('run')
+        axes[0].set_ylabel('value')
+        axes[1].set_title('Top-20 share')
+        axes[1].set_xlabel('run')
+        axes[2].set_title('Top-100 share')
+        axes[2].set_xlabel('run')
+
+        for ax in axes:
+            ax.axvline(-1, color='gray', linestyle='--', alpha=0.5)
+            ax.legend().remove()
+
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='center left', bbox_to_anchor=(.85, 0.5))
+        plt.tight_layout(rect=[0, 0, 0.85, 1])
+        plt.show()
+
+        # --- Lorenz curve ---
+        if plot_lorenz:
+            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+            first_model = next(iter(ratings_by_model))
+            base_cnt = ratings_by_model[first_model][0].groupby('MovieID').size().values
+            lx, ly = lorenz_curve(base_cnt)
+            ax.plot(lx, ly, label='Base', color='gray', linestyle='--', linewidth=2)
+
+            for name, runs in ratings_by_model.items():
+                if not runs:
+                    continue
+                lx, ly = lorenz_curve(runs[-1].groupby('MovieID').size().values)
+                ax.plot(lx, ly, label=f"{name} (final)", color=colors[name])
+
+            ax.plot([0, 1], [0, 1], linestyle='--', color='gray', alpha=0.6)
+            ax.set_title('Lorenz Curve (Item Interaction Counts)')
+            ax.set_xlabel('Cumulative share of items')
+            ax.set_ylabel('Cumulative share of interactions')
+            ax.legend()
+            ax.set_aspect('equal', adjustable='box')
+            plt.tight_layout()
+            plt.show()
 
     return popularity_metrics

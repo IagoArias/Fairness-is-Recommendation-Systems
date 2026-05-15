@@ -1,4 +1,3 @@
-import os
 import random
 from pathlib import Path
 from typing import List, Tuple
@@ -8,7 +7,7 @@ import pandas as pd
 from sklearn.model_selection import KFold
 
 
-DEFAULT_DATA_PATH = Path("../ml-100k")
+DEFAULT_DATA_PATH = Path(__file__).parent.parent.parent / "ml-100k"
 
 
 def load_movielens_100k(data_path: Path = DEFAULT_DATA_PATH) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

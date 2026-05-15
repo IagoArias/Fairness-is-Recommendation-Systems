@@ -40,8 +40,8 @@ def default_values(
     seed = 42 if seed is None else seed
     min_user_ratings = 20 if min_user_ratings is None else min_user_ratings
     min_item_ratings = 5 if min_item_ratings is None else min_item_ratings
-    n_user_clusters = 12 if n_user_clusters is None else n_user_clusters
-    n_item_clusters = 18 if n_item_clusters is None else n_item_clusters
+    n_user_clusters = 10 if n_user_clusters is None else n_user_clusters
+    n_item_clusters = 10 if n_item_clusters is None else n_item_clusters
     beta = 1.0 if beta is None else beta
     return_clusters = True if return_clusters is None else return_clusters
     tau = np.array([-1.2, -0.4, 0.4, 1.2]) if tau is None else tau
@@ -534,7 +534,7 @@ def plot_simulation_distributions_and_heatmap(
     R_syn: np.ndarray | pd.DataFrame,
     heatmap_users: int = 3000,
     heatmap_items: int = 1682,
-    heatmap_title: str = "Rating heatmap (100 users x 100 items)",
+    heatmap_title: str = "",
 ):
     """
     Plot rating distribution, ratings-per-user/item histograms, and a 5-color heatmap.

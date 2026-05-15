@@ -2,6 +2,7 @@ from math import sqrt
 from typing import Dict, Tuple
 
 import numpy as np
+from scipy.spatial.distance import jensenshannon
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -15,6 +16,22 @@ def get_test_indices(R_test: np.ndarray):
 
 def dcg(relevances):
     return sum(rel / np.log2(i + 2) for i, rel in enumerate(relevances))
+
+
+def laplace_log_p(item_counts: np.ndarray, num_users: int) -> np.ndarray:
+    """Laplace-smoothed log2 popularity probability for each item."""
+    P = (item_counts + 1.0) / (num_users + 2.0)
+    return np.log2(np.clip(P, 1e-10, 1.0))
+
+
+def novelty_score(item_indices: np.ndarray, log_P: np.ndarray) -> float:
+    """Mean self-information over a set of items given precomputed log2(P)."""
+    return float(-log_P[item_indices].mean())
+
+
+def relevance_score(ratings: np.ndarray) -> float:
+    """Mean rating over a set of items."""
+    return float(ratings.mean())
 
 
 def eval_rmse_mae(R_test: np.ndarray, R_pred: np.ndarray) -> Tuple[float, float]:
@@ -32,28 +49,26 @@ def eval_novelty_relevance(R_train: np.ndarray, R_test: np.ndarray, R_pred: np.n
     Relevance: mean true rating (if any) on those top-N per user, then avg over users.
     """
     num_users, _ = R_train.shape
+    item_pop = np.sum(~np.isnan(R_train), axis=0)
+    log_P = laplace_log_p(item_pop, num_users)
 
     novelty_u = []
     relevance_u = []
 
     for u in range(num_users):
-        known = ~np.isnan(R_train[u])
-        unknown_items = np.where(~known)[0]
+        unknown_items = np.where(np.isnan(R_train[u]))[0]
         if unknown_items.size == 0:
             continue
 
         k = min(top_n, unknown_items.size)
         top_items = unknown_items[np.argsort(R_pred[u, unknown_items])[::-1][:k]]
 
-        # Novelty
-        item_pop = np.sum(~np.isnan(R_train), axis=0)
-        P = (item_pop + 1.0) / (num_users + 2.0)  # Laplace smoothing
-        novelty_u.append(np.mean(-np.log2(P[top_items])))
+        novelty_u.append(novelty_score(top_items, log_P))
 
-        # Relevance on test ratings (if exist)
-        rel = [R_test[u, j] for j in top_items if not np.isnan(R_test[u, j])]
-        if rel:
-            relevance_u.append(np.mean(rel))
+        test_ratings = R_test[u, top_items]
+        rated = test_ratings[~np.isnan(test_ratings)]
+        if rated.size > 0:
+            relevance_u.append(relevance_score(rated))
 
     novelty = float(np.mean(novelty_u)) if novelty_u else np.nan
     relevance = float(np.mean(relevance_u)) if relevance_u else np.nan
@@ -201,10 +216,41 @@ def evaluate_all_metrics(
     }
 
 
+def _popularity_groups(
+    item_counts: np.ndarray,
+    h_frac: float = 0.2,
+    t_frac: float = 0.2,
+) -> np.ndarray:
+    """
+    Assign each item to a popularity group following Abdollahpouri et al. (2021).
+
+    Returns an int8 array of length I where:
+      2 = Head  — fewest most-popular items whose interactions sum to h_frac of total
+      1 = Mid   — everything in between
+      0 = Tail  — least-popular items whose interactions sum to t_frac of total
+    """
+    total = item_counts.sum()
+    if total == 0:
+        return np.ones(len(item_counts), dtype=np.int8)  # all Mid
+
+    sorted_desc = np.argsort(item_counts)[::-1]
+    cumsum_desc = np.cumsum(item_counts[sorted_desc])
+    head_cut = int(np.searchsorted(cumsum_desc, h_frac * total, side="left"))
+
+    sorted_asc = sorted_desc[::-1]
+    cumsum_asc = np.cumsum(item_counts[sorted_asc])
+    tail_cut = int(np.searchsorted(cumsum_asc, t_frac * total, side="left"))
+
+    groups = np.ones(len(item_counts), dtype=np.int8)   # Mid = 1
+    groups[sorted_desc[: head_cut + 1]] = 2             # Head = 2
+    groups[sorted_asc[: tail_cut + 1]] = 0              # Tail = 0
+    return groups
+
+
 def awpd(
     user_clusters: np.ndarray,        # (U,)     user -> cluster index
     item_clusters: np.ndarray,        # (I,)     item -> cluster index
-    affinity: np.ndarray,             # (UC, IC) affinity matrix, values in [0,1]
+    affinity: np.ndarray,            
     popularity: np.ndarray,           # (I,)     item popularity, normalized [0,1]
     history: list[list[int]],         # (U,)     item indices per user (ragged)
     recommendations: list[list[int]], # (U,)     item indices per user
@@ -217,22 +263,31 @@ def awpd(
     item_counts       = np.bincount(all_items, minlength=len(popularity))
     empirical_popularity = item_counts / item_counts.max()  # [0,1], preserves Zipf shape
 
-    pop_deviations = np.empty(U)
-    misalignments  = np.empty(U)
-    scores         = np.empty(U)
+    # H/M/T groups for UPD (Abdollahpouri et al., 2021)
+    item_groups = _popularity_groups(item_counts)
+
+    upd_scores    = np.empty(U)
+    misalignments = np.empty(U)
+    scores        = np.empty(U)
 
     for u in range(U):
-        uc            = user_clusters[u]
-        hist          = np.array(history[u])
-        recs          = np.array(recommendations[u])
-        hist_pop_mean = popularity[hist].mean()
+        uc   = user_clusters[u]
+        hist = np.array(history[u])
+        recs = np.array(recommendations[u])
 
-        aff           = affinity_normalized[uc, item_clusters[recs]]
-        pop_diff      = empirical_popularity[recs]
+        # UPD: JS divergence between H/M/T distribution in history vs. recommendations
+        p = np.array([np.sum(item_groups[hist] == g) for g in range(3)], dtype=float)
+        q = np.array([np.sum(item_groups[recs] == g) for g in range(3)], dtype=float)
+        p /= p.sum() if p.sum() > 0 else 1.0
+        q /= q.sum() if q.sum() > 0 else 1.0
+        upd_scores[u] = float(jensenshannon(p, q))
 
-        pop_deviations[u] = pop_diff.mean()
-        misalignments[u]  = (1 - aff).mean()
-        scores[u]         = np.sqrt(pop_diff**2 + (1 - aff)**2).mean()  # Fórmula igual que la velocidad en física, pop_deviation y pop_deviation son componentes
+        # Cluster misalignment: sigmoid handles the [-∞, +∞] → (0,1) mapping
+        aff              = affinity_normalized[uc, item_clusters[recs]]
+        misalignments[u] = (1 - aff).mean()
+
+        # AWPD: Euclidean distance in (UPD, misalignment) space
+        scores[u] = np.sqrt(upd_scores[u]**2 + misalignments[u]**2)
 
     # Aggregate by cluster
     cluster_ids = np.unique(user_clusters)
@@ -240,10 +295,10 @@ def awpd(
     for c in cluster_ids:
         mask = user_clusters == c
         entry = {
-            "awpd":          float(scores[mask].mean()),
-            "pop_deviation": float(pop_deviations[mask].mean()),
-            "misalignment":  float(misalignments[mask].mean()),
-            "n_users":       int(mask.sum()),
+            "awpd":         float(scores[mask].mean()),
+            "upd":          float(upd_scores[mask].mean()),
+            "misalignment": float(misalignments[mask].mean()),
+            "n_users":      int(mask.sum()),
         }
         if rmse_per_user is not None:
             entry["rmse"] = float(rmse_per_user[mask].mean())
@@ -252,7 +307,7 @@ def awpd(
     result = {
         "awpd":          float(scores.mean()),
         "per_user_awpd": scores,
-        "pop_deviation": pop_deviations,
+        "upd":           upd_scores,
         "misalignment":  misalignments,
         "by_cluster":    by_cluster,
     }
